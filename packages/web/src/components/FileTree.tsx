@@ -10,6 +10,26 @@ interface TreeNode {
   children?: TreeNode[];
 }
 
+/**
+ * ★ B17 二进制文件扩展名判断：图片/字体/音视频/压缩包/PDF/Office 等。
+ * 命中则不送 Monaco（避免乱码），仅展示提示。
+ */
+const BINARY_EXTS = new Set([
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".tiff", ".svgz",
+  ".mp3", ".mp4", ".wav", ".avi", ".mov", ".webm", ".ogg", ".flac", ".m4a",
+  ".woff", ".woff2", ".ttf", ".otf", ".eot",
+  ".pdf",
+  ".zip", ".gz", ".tar", ".tgz", ".rar", ".7z", ".bz2",
+  ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+  ".exe", ".dll", ".so", ".dylib", ".class", ".jar",
+  ".wasm", ".pak",
+]);
+function isBinaryFile(path: string): boolean {
+  const dot = path.lastIndexOf(".");
+  if (dot < 0) return false;
+  return BINARY_EXTS.has(path.slice(dot).toLowerCase());
+}
+
 /** 把扁平 FileEntry[] 构建成嵌套树 */
 function buildTree(entries: FileEntry[]): TreeNode[] {
   const root: TreeNode[] = [];
@@ -60,12 +80,24 @@ export function FileTree() {
 
   const openFile = async (path: string) => {
     if (!sessionId) return;
+    // ★ B17 二进制文件检测：图片/PDF/字体/音视频/zip 等不送 Monaco，直接提示
+    if (isBinaryFile(path)) {
+      setCurrentPath(path);
+      setFileContent(path, `（二进制文件，无法以文本展示：${path}）`);
+      return;
+    }
     setCurrentPath(path);
     try {
       const data = (await sendAsync({ id: genId(), type: "file.read", sessionId, path })) as { content: string };
-      setFileContent(path, data.content);
+      // 后端按 utf-8 读，若内容含大量 U+FFFD 替换符 → 大概率是二进制被强转，提示一下
+      const content = data.content ?? "";
+      if (content.length > 0 && (content.match(/\uFFFD/g)?.length ?? 0) > content.length * 0.05) {
+        setFileContent(path, `（检测到大量解码替换符，可能是二进制文件：${path}）\n\n${content.slice(0, 2000)}`);
+      } else {
+        setFileContent(path, content);
+      }
     } catch (e) {
-      // 读失败（可能是二进制或不存在），忽略
+      // 读失败（可能是权限或不存在），忽略
       console.warn("file.read failed", e);
     }
   };

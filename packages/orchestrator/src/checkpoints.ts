@@ -11,7 +11,19 @@ import { randomUUID } from "node:crypto";
 import type { CheckpointInfo } from "@ai-cowork/shared";
 
 const CP_DIR = ".aicowork/checkpoints";
-const EXCLUDE = new Set([".aicowork"]);
+/**
+ * 回滚时排除的目录/文件：
+ * - `.aicowork`：快照存储自身，必须保留
+ * - `node_modules`：依赖目录，删除后要重装几分钟，不该被回滚清掉
+ * - `.git`：版本历史，删了等于丢历史，绝不能动
+ * - `dist`/`build`/`.next`/`.cache`：构建产物，删了要重新构建
+ *
+ * 注意：创建快照时仍然完整拷贝这些目录（保证回滚后状态一致），
+ * 仅在「回滚清空 cwd」这一步跳过它们，避免误删重资源。
+ */
+const EXCLUDE_ON_ROLLBACK = new Set([".aicowork", "node_modules", ".git", "dist", "build", ".next", ".cache"]);
+/** 创建快照时排除的目录：避免把 node_modules 等重目录也拷进快照（体积大、且与回滚无关） */
+const EXCLUDE_ON_SNAPSHOT = new Set([".aicowork", "node_modules", ".git", "dist", "build", ".next", ".cache"]);
 
 function cpRoot(cwd: string) { return join(cwd, CP_DIR); }
 function cpDir(cwd: string, id: string) { return join(cpRoot(cwd), id); }
@@ -27,7 +39,7 @@ export async function createCheckpoint(cwd: string, label?: string): Promise<Che
   let fileCount = 0;
   const entries = await readdir(cwd, { withFileTypes: true });
   for (const e of entries) {
-    if (EXCLUDE.has(e.name.toString())) continue;
+    if (EXCLUDE_ON_SNAPSHOT.has(e.name.toString())) continue;
     fileCount += await copyRecursive(join(cwd, e.name.toString()), join(target, e.name.toString()));
   }
   const info: CheckpointInfo = { ...meta, fileCount };
@@ -59,18 +71,18 @@ export async function listCheckpoints(cwd: string): Promise<CheckpointInfo[]> {
   return infos.sort((a, b) => b.createdAt - a.createdAt);
 }
 
-/** 回滚：清空 cwd 用户内容（保留 .aicowork），从 checkpoint 还原 */
+/** 回滚：清空 cwd 用户内容（保留 .aicowork / node_modules / .git 等关键目录），从 checkpoint 还原 */
 export async function rollbackCheckpoint(cwd: string, checkpointId: string): Promise<void> {
   const src = dataDir(cwd, checkpointId);
   // 确认存在
   await stat(src); // 不存在抛错
-  // 清 cwd 用户内容
+  // 清 cwd 用户内容，但跳过 node_modules / .git / dist 等关键目录（见 EXCLUDE_ON_ROLLBACK 说明）
   const entries = await readdir(cwd, { withFileTypes: true });
   for (const e of entries) {
-    if (EXCLUDE.has(e.name.toString())) continue;
+    if (EXCLUDE_ON_ROLLBACK.has(e.name.toString())) continue;
     await rm(join(cwd, e.name.toString()), { recursive: true, force: true });
   }
-  // 还原
+  // 还原快照内容（快照本身已不含 node_modules 等，所以只还原用户文件）
   const files = await readdir(src, { withFileTypes: true });
   for (const e of files) {
     await copyRecursive(join(src, e.name.toString()), join(cwd, e.name.toString()));

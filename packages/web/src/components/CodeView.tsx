@@ -26,6 +26,11 @@ export function CodeView() {
     const editor = editorRef.current;
     const monaco = monacoRef.current;
     if (!editor || !monaco) return;
+    // ★ B18：切文件时先用空 decorations 清掉上一文件残留高亮，避免切换瞬间看到旧高亮闪一下
+    //   deltaDecorations 第一个参数传当前 decorationsRef（旧文件的），第二个传新文件的 decos
+    //   Monaco 会自动 diff 旧→新并移除多余的；这里显式传 [] 再传 decos 是双重保险，
+    //   保证 currentPath 变化时第一时间清空。
+    decorationsRef.current = editor.deltaDecorations(decorationsRef.current, []);
     const decos = diffLines.map((ln) => ({
       range: new monaco.Range(ln + 1, 1, ln + 1, 1),
       options: {

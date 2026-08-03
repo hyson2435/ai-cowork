@@ -16,6 +16,7 @@
   "engines": {
     "node": ">=18"
   },
+  "engineStrict": true,
   "workspaces": ["packages/*"],
   "scripts": {
     "dev:orch": "npm run dev -w @ai-cowork/orchestrator",

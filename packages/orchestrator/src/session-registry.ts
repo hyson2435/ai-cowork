@@ -289,6 +289,10 @@ export class SessionRegistry {
     const createOpts: Parameters<typeof createAgentSession>[0] = {
       cwd: opts.cwd,
       sessionManager: SessionManager.inMemory(),
+      // ★ Reviewer 必须只读：工具白名单只暴露 read/grep/ls/glob，
+      //   根本不暴露 write/edit/bash，从工具层杜绝 Reviewer 改文件。
+      //   之前没传 tools = Reviewer 拿到全部工具，只靠 prompt 约束，违背"只读审查"设计。
+      tools: ["read", "grep", "ls", "glob"],
     };
     const modelSpec = opts.model ?? config.defaultModel;
     if (modelSpec) {
@@ -415,6 +419,51 @@ export class SessionRegistry {
     }
   }
 
+  /**
+   * 事件驱动收集 reviewer 输出（B6/B7/B23 修复）。
+   * 返回：
+   *   - raw(): 取当前累积的文本
+   *   - cancel(): 等待 agent_end 或超时，返回后已 unsubscribe，无 timer 泄漏
+   * 用法：
+   *   const c = this.collectReviewerOutput(sessionId);
+   *   await reviewer.session.prompt(...);
+   *   await c.cancel();       // 等到结束 / 超时
+   *   const out = c.raw();
+   */
+  private collectReviewerOutput(sessionId: string): {
+    raw: () => string;
+    cancel: () => Promise<void>;
+  } {
+    const entry = this.sessions.get(sessionId);
+    if (!entry?.reviewer) {
+      return { raw: () => "", cancel: async () => {} };
+    }
+    let buf = "";
+    let resolveFn: (() => void) | null = null;
+    const unsub = entry.reviewer.session.subscribe((e) => {
+      if (e.type === "message_update" && e.assistantMessageEvent.type === "text_delta") {
+        buf += e.assistantMessageEvent.delta;
+      }
+      if (e.type === "agent_end") {
+        if (resolveFn) { const r = resolveFn; resolveFn = null; r(); }
+      }
+    });
+    // 60s 超时兜底（之前是 120s，过长；reviewer 正常几秒就完事）
+    let timer: NodeJS.Timeout | null = setTimeout(() => {
+      if (resolveFn) { const r = resolveFn; resolveFn = null; r(); }
+    }, 60000);
+    const donePromise = new Promise<void>((resolve) => { resolveFn = resolve; });
+    return {
+      raw: () => buf,
+      cancel: async () => {
+        try { await donePromise; } finally {
+          unsub();
+          if (timer) { clearTimeout(timer); timer = null; }
+        }
+      },
+    };
+  }
+
   /** 执行一次代码审查 */
   private async executeReview(sessionId: string, filesToReview: string[]): Promise<void> {
     const entry = this.sessions.get(sessionId);
@@ -436,35 +485,21 @@ export class SessionRegistry {
       "注意：只有发现严重 bug / 安全问题 / 明显不满足需求 才写 SEVERE=YES，否则一律 NO。",
       "不要使用 write_file/edit_file/bash 等修改工具，只能用只读 view 类工具。",
     ].join("\n");
-    let raw = "";
-    let done = false;
-    const collectUnsub = entry.reviewer.session.subscribe((e) => {
-      if (e.type === "message_update" && e.assistantMessageEvent.type === "text_delta") {
-        raw += e.assistantMessageEvent.delta;
-      }
-      if (e.type === "agent_end") {
-        done = true;
-      }
-    });
-    const donePromise = new Promise<void>((resolve) => {
-      const tick = setInterval(() => {
-        if (done) { clearInterval(tick); resolve(); }
-      }, 200);
-      setTimeout(() => { clearInterval(tick); resolve(); }, 120000);
-    });
+    // ★ 事件驱动收集 reviewer 输出，避免轮询（B6/B7/B23）
+    const { raw, cancel } = this.collectReviewerOutput(sessionId);
     try {
       await entry.reviewer.session.prompt(prompt);
     } catch {
       // reviewer prompt 出错继续解析已收到的内容
     }
-    await donePromise;
-    collectUnsub();
+    await cancel();
+    const out = raw();
 
-    const severeLine = /SEVERE\s*=\s*(YES|NO)/i.exec(raw);
-    const summaryLine = /SUMMARY\s*=\s*(.+)/i.exec(raw);
-    const filesLine = /FILES\s*=\s*(.+)/i.exec(raw);
+    const severeLine = /SEVERE\s*=\s*(YES|NO)/i.exec(out);
+    const summaryLine = /SUMMARY\s*=\s*(.+)/i.exec(out);
+    const filesLine = /FILES\s*=\s*(.+)/i.exec(out);
     const severe = severeLine ? severeLine[1].toUpperCase() === "YES" : false;
-    const summary = summaryLine ? summaryLine[1].trim() : (raw.slice(0, 200).trim() || "无审查输出");
+    const summary = summaryLine ? summaryLine[1].trim() : (out.slice(0, 200).trim() || "无审查输出");
     const reviewed = filesLine
       ? filesLine[1].split(/[,，]/).map((s) => s.trim()).filter(Boolean)
       : filesToReview;
@@ -525,28 +560,16 @@ export class SessionRegistry {
     ].join("\n");
 
     let raw = "";
-    let done = false;
-    const collectUnsub = entry.reviewer.session.subscribe((e) => {
-      if (e.type === "message_update" && e.assistantMessageEvent.type === "text_delta") {
-        raw += e.assistantMessageEvent.delta;
-      }
-      if (e.type === "agent_end") {
-        done = true;
-      }
-    });
-    const donePromise = new Promise<void>((resolve) => {
-      const tick = setInterval(() => {
-        if (done) { clearInterval(tick); resolve(); }
-      }, 200);
-      setTimeout(() => { clearInterval(tick); resolve(); }, 120000);
-    });
+    // ★ 事件驱动收集 reviewer 输出，避免轮询（B6/B7/B23）
+    const collector = this.collectReviewerOutput(sessionId);
+    raw = "";
     try {
       await entry.reviewer.session.prompt(`${prompt}\n\n用户问题：${userMessage}`);
     } catch {
       // 出错继续解析已收到的内容
     }
-    await donePromise;
-    collectUnsub();
+    await collector.cancel();
+    raw = collector.raw();
 
     // 提取 [APPLY:] 指令
     const applyMatch = /\[APPLY:\s*(.+?)\]/i.exec(raw);
@@ -736,13 +759,19 @@ export class SessionRegistry {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
     PV.stopPreview(sessionId).catch(() => {});
+    // ★ 释放 Reviewer session（之前漏了，会导致 session 泄漏：pi 内部状态 + 订阅 + 可能的 socket）
+    if (entry.reviewer) {
+      entry.reviewer.unsubscribe();
+      entry.reviewer.session.dispose();
+      entry.reviewer = undefined;
+    }
     entry.unsubscribe();
     entry.session.dispose();
     this.sessions.delete(sessionId);
   }
 
   disposeAll(): void {
-    PV.stopAllPreviews();
+    // dispose 内部已对每个 session 调 PV.stopPreview，这里不再重复 stopAllPreviews
     for (const id of [...this.sessions.keys()]) this.dispose(id);
   }
 
@@ -766,7 +795,10 @@ export class SessionRegistry {
     const entry = this.sessions.get(sessionId);
     if (!entry) throw new Error(`session not found: ${sessionId}`);
     const abs = pathResolve(entry.cwd, path);
-    // 防止路径穿越
+    // 防止路径穿越（仅对前端 file.read API 有效）
+    // 注意：Coder/Reviewer Agent 通过 pi-coding-agent 的 read/write/edit 工具直接操作文件，
+    //       那一层的 cwd 校验由 pi 内部负责，本方法管不到。如需对 Agent 也强制路径限制，
+    //       需在 tool_start 事件里拦截并检查 args.path，目前未实现，依赖 pi 的 cwd 沙箱。
     const rel = relative(entry.cwd, abs);
     if (rel.startsWith("..")) throw new Error(`path outside cwd: ${path}`);
     return readFile(abs, "utf-8");
@@ -794,6 +826,8 @@ async function walk(root: string, dir: string, out: FileEntry[], depth: number):
   for (const e of entries) {
     const name = e.name.toString();
     if (NOISE_DIRS.has(name)) continue;
+    // ★ 符号链接保护（B25）：跳过 symlink，避免循环链接（如 ln -s . self）导致无限递归栈溢出
+    if (e.isSymbolicLink()) continue;
     const abs = join(dir, name);
     const rel = relative(root, abs);
     if (e.isDirectory()) {
@@ -939,7 +973,8 @@ export function extractPlanSummary(plan: string): string {
   for (const l of lines) {
     if (l.startsWith("#")) {
       if (!title) title = l.replace(/^#+\s*/, "");
-    } else if (!l.startsWith("#") && !firstPara) {
+    } else if (!firstPara) {
+      // 走到这里 l 必然不以 # 开头（上面 if 已处理），不再重复判断
       firstPara = l;
     }
     if (title && firstPara) break;

@@ -3,14 +3,21 @@ import type { FileEntry, CheckpointInfo, PreviewInfo, CopilotMessage, CopilotSta
 
 /**
  * 计算新旧文本之间的行级 diff，返回「新文本中新增/修改行」的 0-based 行号数组。
- * 用 LCS 做行级比对；对超大文件（>2000 行）直接返回 [] 避免性能问题。
+ * 用 LCS 做行级比对。
+ *
+ * ★ B16 性能保护：
+ *   - LCS DP 是 O(m*n) 时间 + O(m*n) 空间，在主线程同步跑。
+ *   - 之前阈值 2000 行 → 2000×2000 = 400 万格子，会卡 UI 几百毫秒。
+ *   - 现在阈值降到 800 行（800×800 = 64 万，<16ms），更大文件直接返回 []，
+ *     跳过高亮（不影响功能，只是不再标"变更行"）。
+ *   - 后续如需支持大文件 diff，应迁移到 Web Worker。
  */
 function diffLineNumbers(oldText: string, newText: string): number[] {
   const oldLines = oldText.split("\n");
   const newLines = newText.split("\n");
   const m = oldLines.length;
   const n = newLines.length;
-  if (m > 2000 || n > 2000) return [];
+  if (m > 800 || n > 800) return [];
   // LCS DP（从后往前填表）
   const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
   for (let i = m - 1; i >= 0; i--) {

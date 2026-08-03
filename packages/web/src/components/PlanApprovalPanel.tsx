@@ -95,10 +95,14 @@ export function PlanApprovalPanel() {
   const [mode, setMode] = useState<"buttons" | "iterate">("buttons");
   const [feedback, setFeedback] = useState("");
   const [collapsed, setCollapsed] = useState(false);
+  // ★ B8 防重入：决策发出后立即禁用所有按钮，避免连点触发多次 plan.approve
+  const [submitting, setSubmitting] = useState(false);
 
+  // ★ B13 修正 useMemo 依赖：用 planState 整体（而非可选链 planState?.plan），
+  //   避免 lint 警告和严格模式下漏更新
   const blocks = useMemo(
     () => (planState ? renderPlanMarkdown(planState.plan) : null),
-    [planState?.plan],
+    [planState],
   );
 
   if (!planState || !sessionId) return null;
@@ -125,6 +129,8 @@ export function PlanApprovalPanel() {
 
   // proposing：模态弹层
   const sendDecision = (decision: "approved" | "rejected" | "iterate", fb?: string) => {
+    if (submitting) return; // 防重入
+    setSubmitting(true);
     send({
       id: genId(),
       type: "plan.approve",
@@ -154,14 +160,15 @@ export function PlanApprovalPanel() {
               placeholder="请输入对计划的修改建议（例如：先做登录页、跳过测试、改用 Tailwind…）"
               rows={3}
               autoFocus
+              disabled={submitting}
             />
             <div className="plan-iterate-btns">
               <button
                 className="plan-btn plan-iterate-confirm"
                 onClick={() => sendDecision("iterate", feedback.trim() || undefined)}
-                disabled={!feedback.trim()}
+                disabled={!feedback.trim() || submitting}
               >
-                提交修改意见
+                {submitting ? "提交中…" : "提交修改意见"}
               </button>
               <button
                 className="plan-btn plan-btn-cancel"
@@ -169,6 +176,7 @@ export function PlanApprovalPanel() {
                   setMode("buttons");
                   setFeedback("");
                 }}
+                disabled={submitting}
               >
                 返回
               </button>
@@ -179,18 +187,21 @@ export function PlanApprovalPanel() {
             <button
               className="plan-btn plan-btn-approve"
               onClick={() => sendDecision("approved")}
+              disabled={submitting}
             >
-              ✅ 批准并执行
+              {submitting ? "处理中…" : "✅ 批准并执行"}
             </button>
             <button
               className="plan-btn plan-btn-iterate"
               onClick={() => setMode("iterate")}
+              disabled={submitting}
             >
               🔁 要求修改
             </button>
             <button
               className="plan-btn plan-btn-reject"
               onClick={() => sendDecision("rejected")}
+              disabled={submitting}
             >
               ❌ 拒绝重规划
             </button>

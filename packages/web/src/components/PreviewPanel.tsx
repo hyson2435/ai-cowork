@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useStore } from "../store";
 import { sendAsync, genId } from "../ws";
 import type { PreviewInfo } from "@ai-cowork/shared";
@@ -43,18 +43,7 @@ export function PreviewPanel() {
     return result;
   }, [files]);
 
-  // 检测到有 index.html 且 preview 未启动 → 自动启一次（不阻塞，失败就静默）
-  useEffect(() => {
-    if (preview || busy) return;
-    if (!entryCandidates.includes("index.html")) return;
-    const id = setTimeout(() => {
-      start("index.html").catch(() => {});
-    }, 800);
-    return () => clearTimeout(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, preview, files.length]);
-
-  const start = async (entryFile?: string) => {
+  const start = useCallback(async (entryFile?: string) => {
     if (!sessionId) return;
     setBusy(true);
     try {
@@ -67,7 +56,18 @@ export function PreviewPanel() {
     } finally {
       setBusy(false);
     }
-  };
+  }, [sessionId, entry]);
+
+  // 检测到有 index.html 且 preview 未启动 → 自动启一次（不阻塞，失败就静默）
+  // ★ B15 修正：start 和 busy 加入依赖，避免 stale closure 和并发触发
+  useEffect(() => {
+    if (preview || busy) return;
+    if (!entryCandidates.includes("index.html")) return;
+    const id = setTimeout(() => {
+      start("index.html").catch(() => {});
+    }, 800);
+    return () => clearTimeout(id);
+  }, [sessionId, preview, busy, entryCandidates, start]);
 
   const stop = async () => {
     if (!sessionId) return;
@@ -87,9 +87,10 @@ export function PreviewPanel() {
   const src = useMemo(() => {
     if (!preview) return "";
     const base = buildPreviewBasePath(preview);
-    // rev 作为 query，保证变化时 iframe 重新加载（不用全量 reload）
+    // ★ B14 清理死代码：原 `${entryPath || preview.entry ? "" : ""}` 三元两边都是空串，是无意义表达式
+    //   最终效果等价于直接拼 base + entryPath（去掉前导斜杠）+ ?_rev=N
     const entryPath = preview.entry || "";
-    return `${base}${entryPath.replace(/^\/+/, "")}${entryPath || preview.entry ? "" : ""}?_rev=${previewRev}`;
+    return `${base}${entryPath.replace(/^\/+/, "")}?_rev=${previewRev}`;
   }, [preview, previewRev]);
 
   return (

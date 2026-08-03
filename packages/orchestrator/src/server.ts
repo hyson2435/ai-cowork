@@ -98,6 +98,8 @@ fastify.get(
           ),
           host: u.host,
         },
+        // ★ 加超时：上游 preview 卡住时 5s 后主动 abort，避免 fastify 连接被长期占用、前端一直转圈
+        timeout: 5000,
       };
       const proxyReq = http.request(opts, (upRes) => {
         reply.code(upRes.statusCode ?? 200);
@@ -115,8 +117,14 @@ fastify.get(
           resolve();
         });
       });
+      // ★ socket 超时触发后主动 destroy，让 upRes/end 永不触发 → 兜底回 504
+      proxyReq.on("timeout", () => {
+        proxyReq.destroy(new Error("preview upstream timeout"));
+      });
       proxyReq.on("error", (err) => {
-        reply.code(502).send("preview upstream error: " + err.message);
+        // ★ 脱敏：只暴露通用错误类别，不泄露内部路径
+        const msg = err.message.includes("timeout") ? "preview upstream timeout" : "preview upstream error";
+        reply.code(502).send(msg);
         resolve();
       });
       proxyReq.end();
@@ -124,7 +132,26 @@ fastify.get(
   },
 );
 
-fastify.get("/ws", { websocket: true }, (socket: WebSocket) => {
+fastify.get("/ws", { websocket: true }, (connection, req) => {
+  // 兼容 fastify-websocket 不同版本：connection 可能是 socket 或 { socket }
+  const socket = (connection as WebSocket & { socket?: WebSocket }).socket ?? (connection as WebSocket);
+  // ★ WS 鉴权
+  //   - 配了 authToken：query 里 ?token=xxx 必须匹配
+  //   - 没配 authToken：只允许本机回环连接
+  const query = (req.url ?? "").split("?")[1] ?? "";
+  const params = new URLSearchParams(query);
+  const token = params.get("token");
+  const peerAddr = req.socket.remoteAddress ?? "";
+  const isLoopback = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(peerAddr) || /localhost/i.test(req.headers.host ?? "");
+  if (config.authToken) {
+    if (token !== config.authToken) {
+      try { socket.close(4001, "unauthorized"); } catch {}
+      return;
+    }
+  } else if (!isLoopback) {
+    try { socket.close(4003, "loopback only; set AICOWORK_AUTH_TOKEN to expose"); } catch {}
+    return;
+  }
   clients.add(socket);
 
   socket.on("message", async (raw: Buffer) => {
@@ -255,9 +282,22 @@ async function handleCommand(cmd: ClientCommand, reply: (r: CommandResponse) => 
       type: "response",
       command: cmd.type,
       success: false,
-      error: e instanceof Error ? e.message : String(e),
+      // ★ 脱敏：内部异常原样回前端可能泄露服务器路径/栈片段。
+      //   - 已知业务错误（如 "session not found"）保留原文，便于用户排查
+      //   - 含路径/堆栈的未知错误统一回 "internal error"，详情只记日志
+      error: sanitizeError(e),
     });
   }
+}
+
+/** 错误脱敏：业务错误保留，含敏感信息的内部错误统一回 internal error */
+function sanitizeError(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  // 简单启发式：含绝对路径 / 堆栈标志 / ECONNREFUSED 等系统错误 → 视为内部错误
+  if (/\/(home|usr|var|tmp|root)\//.test(msg) || /\b(Error|ENOENT|EACCES|ECONNREFUSED):\s/.test(msg) || msg.includes("at ")) {
+    return "internal error (see server logs)";
+  }
+  return msg;
 }
 
 // 优雅退出
@@ -273,9 +313,14 @@ if (!config.anthropicKey && !config.openaiKey && !config.deepseekKey) {
   fastify.log.warn("未检测到 ANTHROPIC_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY，Agent 可能无法运行");
 }
 
+// ★ 安全提示：未设 token 且监听非回环时，启动期高亮警告
+if (!config.authToken && config.host !== "127.0.0.1" && config.host !== "localhost") {
+  fastify.log.warn("⚠️  HOST=0.0.0.0 但未设置 AICOWORK_AUTH_TOKEN：任何人都能连上 /ws 调用 Agent，强烈建议设置 token！");
+}
+
 fastify
-  .listen({ port: config.port, host: "0.0.0.0" })
-  .then(() => fastify.log.info(`orchestrator listening on :${config.port}`))
+  .listen({ port: config.port, host: config.host })
+  .then(() => fastify.log.info(`orchestrator listening on ${config.host}:${config.port}`))
   .catch((err) => {
     fastify.log.error(err, "listen failed");
     process.exit(1);
