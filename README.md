@@ -1,5 +1,10 @@
 # AI Cowork
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Node: >=18](https://img.shields.io/badge/Node-%3E%3D18-brightgreen.svg)](https://nodejs.org/)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-blue.svg)](CONTRIBUTING.md)
+[![GitHub stars](https://img.shields.io/github/stars/hysonwang/ai-cowork?style=social)](https://github.com/hysonwang/ai-cowork/stargazers)
+
 基于 LLM 的结对编程工作台：一个 **Coder Agent** 写代码，一个 **Reviewer Agent** 实时审查，配合计划审批、快照回滚、预览、危险命令拦截等安全机制，让 AI 改代码既高效又可控。
 
 ## 功能特性
