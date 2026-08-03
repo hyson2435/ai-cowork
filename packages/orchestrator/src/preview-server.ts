@@ -162,13 +162,19 @@ export async function stopPreview(sessionId: string): Promise<void> {
   const e = entries.get(sessionId);
   if (!e) return;
   entries.delete(sessionId);
+  // ★ BUG 修复：旧 Node 或 keep-alive 长连下 server.close 永不回调，stopPreview 永久挂起，
+  //   导致调用方（dispose/startPreview）卡死。加 5s 超时兜底。
   await new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
     try {
       e.server.closeAllConnections?.();
     } catch {
       // 忽略
     }
-    e.server.close(() => resolve());
+    e.server.close(() => finish());
+    // 5s 超时兜底：无论 close 是否回调都 resolve，避免永久挂起
+    setTimeout(finish, 5000);
   });
 }
 

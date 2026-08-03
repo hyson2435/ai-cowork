@@ -8,7 +8,7 @@ import http from "node:http";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 process.chdir(join(__dirname, ".."));
 
-const PV = await import("./dist/preview-server.js");
+const PV = await import("../dist/preview-server.js");
 
 const CWD = "/tmp/aicowork-preview-test";
 const SID = "test-session-id";

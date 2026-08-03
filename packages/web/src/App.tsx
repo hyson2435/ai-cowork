@@ -31,21 +31,29 @@ export default function App() {
   const [permissionModeChoice, setPermissionModeChoice] = useState<"free" | "read-only" | "plan">("free");
 
   const start = async () => {
-    const data = (await sendAsync({
-      id: genId(),
-      type: "session.start",
-      cwd,
-      prompt,
-      model: modelSpec || undefined,
-      review: startReview,
-      permissionMode: permissionModeChoice,
-    })) as { sessionId: string; reviewer?: boolean };
-    // 拉取初始文件树
+    // ★ BUG 修复：start 失败（ws 断开/服务端 error）时 sendAsync reject 无人处理，
+    //   触发 unhandledrejection 且用户无反馈。加 try/catch + alert。
+    //   同时启动新 session 前调用 clear() 重置状态，避免残留上一 session 数据。
     try {
-      const files = await sendAsync({ id: genId(), type: "file.list", sessionId: data.sessionId });
-      setFiles(files as never);
-    } catch {
-      // 忽略
+      useStore.getState().clear();
+      const data = (await sendAsync({
+        id: genId(),
+        type: "session.start",
+        cwd,
+        prompt,
+        model: modelSpec || undefined,
+        review: startReview,
+        permissionMode: permissionModeChoice,
+      })) as { sessionId: string; reviewer?: boolean };
+      // 拉取初始文件树
+      try {
+        const files = await sendAsync({ id: genId(), type: "file.list", sessionId: data.sessionId });
+        setFiles(files as never);
+      } catch {
+        // 忽略
+      }
+    } catch (err) {
+      alert("启动 Agent 失败：" + (err instanceof Error ? err.message : String(err)));
     }
   };
 

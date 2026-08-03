@@ -6,6 +6,10 @@ import { useStore } from "./store";
 
 let ws: WebSocket | null = null;
 let wantOpen = false;
+// ★ BUG 修复：重连固定 2s 死循环，服务端长时间宕机时每 2s 重连永不放弃。
+//   改为指数退避：2s → 4 → 8 → 16 → 30s 封顶，减少无效重连。
+let reconnectDelay = 2000;
+const MAX_RECONNECT_DELAY = 30000;
 
 /** 生成命令 id。crypto.randomUUID 需要安全上下文(https/localhost)，预览代理下可能不可用，做兜底。 */
 export function genId(): string {
@@ -21,6 +25,7 @@ export function genId(): string {
 
 export function connectWs() {
   wantOpen = true;
+  reconnectDelay = 2000;
   open();
 }
 
@@ -29,11 +34,20 @@ function open() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const url = `${proto}://${location.host}/ws`;
   ws = new WebSocket(url);
-  ws.onopen = () => useStore.getState().setConnected(true);
+  ws.onopen = () => {
+    useStore.getState().setConnected(true);
+    // 连接成功，重置退避
+    reconnectDelay = 2000;
+  };
   ws.onclose = () => {
     useStore.getState().setConnected(false);
     ws = null;
-    if (wantOpen) setTimeout(open, 2000);
+    if (wantOpen) {
+      // ★ 指数退避：每次失败翻倍，封顶 30s
+      const delay = reconnectDelay;
+      reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+      setTimeout(open, delay);
+    }
   };
   ws.onerror = () => {
     // onclose 会兜底重连
@@ -62,11 +76,18 @@ export function sendAsync(cmd: ClientCommand): Promise<unknown> {
       reject(new Error("ws not connected"));
       return;
     }
+    // ★ 统一清理：response 收到 / ws 关闭 / 超时 三种情况都移除 listener 和 timer
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const cleanup = () => {
+      ws?.removeEventListener("message", handler);
+      ws?.removeEventListener("close", onClose);
+      if (timer) { clearTimeout(timer); timer = null; }
+    };
     const handler = (raw: MessageEvent) => {
       try {
         const msg = JSON.parse(raw.data);
         if (msg.type === "response" && msg.id === cmd.id) {
-          ws?.removeEventListener("message", handler);
+          cleanup();
           if (msg.success) resolve(msg.data);
           else reject(new Error(msg.error || "command failed"));
         }
@@ -74,7 +95,20 @@ export function sendAsync(cmd: ClientCommand): Promise<unknown> {
         // 忽略非 JSON
       }
     };
+    // ★ ws 断开时 reject：之前没监听 close，如果命令发出后 ws 断开
+    //   （如服务重启/网络中断），Promise 永远挂起，导致 busy 状态卡死
+    const onClose = () => {
+      cleanup();
+      reject(new Error("ws closed before response"));
+    };
+    // ★ BUG 修复：ws 仍 OPEN 但服务端 bug/崩溃未回 response 时，Promise 永久挂起，
+    //   listener 永久驻留 + busy 状态卡死。加 30s 超时兜底。
+    timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("command timeout (30s)"));
+    }, 30000);
     ws.addEventListener("message", handler);
+    ws.addEventListener("close", onClose);
     ws.send(JSON.stringify(cmd));
   });
 }
@@ -154,12 +188,11 @@ function handleEvent(ev: ServerEvent) {
       break;
     case "checkpoint.rolled_back":
       s.append({ kind: "lifecycle", type: `已回滚到 checkpoint ${ev.checkpointId.slice(0, 8)}`, ts: Date.now() });
-      // 回滚后刷新文件树
-      try {
-        send({ id: genId(), type: "file.list", sessionId: ev.sessionId });
-      } catch {
-        // 忽略
-      }
+      // ★ BUG 修复：之前用 send（静默丢弃），response 无监听者，文件树不会刷新。
+      //   改用 sendAsync 拿到文件列表后 setFiles，确保回滚后 UI 与磁盘一致。
+      sendAsync({ id: genId(), type: "file.list", sessionId: ev.sessionId })
+        .then((files) => useStore.getState().setFiles(files as never))
+        .catch(() => { /* 忽略，文件树刷新失败不阻塞 */ });
       break;
     case "preview.started":
       s.setPreview(ev.preview);

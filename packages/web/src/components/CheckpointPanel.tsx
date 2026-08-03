@@ -22,14 +22,18 @@ export function CheckpointPanel() {
     if (!sessionId) return;
     setBusy("create");
     try {
-      const cp = (await sendAsync({
+      await sendAsync({
         id: genId(),
         type: "checkpoint.create",
         sessionId,
         label: label.trim() || undefined,
-      })) as CheckpointInfo;
-      addCheckpointLocal(cp);
+      });
+      // ★ BUG 修复：移除 addCheckpointLocal（闭包陈旧会覆盖并发事件期间新增的 cp）。
+      //   服务端会广播 checkpoint.created 事件 → store.addCheckpoint（已去重），
+      //   这里不再本地操作 checkpoints，避免与事件竞争。
       setLabel("");
+    } catch (err) {
+      alert("创建快照失败：" + (err instanceof Error ? err.message : String(err)));
     } finally {
       setBusy(null);
     }
@@ -45,6 +49,8 @@ export function CheckpointPanel() {
         sessionId,
       })) as CheckpointInfo[];
       setCheckpoints(list);
+    } catch (err) {
+      alert("刷新失败：" + (err instanceof Error ? err.message : String(err)));
     } finally {
       setBusy(null);
     }
@@ -64,16 +70,10 @@ export function CheckpointPanel() {
       });
       // 事件里会刷新文件树；顺便也刷新 checkpoint 列表（当前逻辑下不变，但保险起见）
       void refresh();
+    } catch (err) {
+      alert("回滚失败：" + (err instanceof Error ? err.message : String(err)));
     } finally {
       setBusy(null);
-    }
-  };
-
-  // 因为 sendAsync 只拿到 response，checkpoint.created 事件也会 addCheckpoint，这里做个去重
-  const addCheckpointLocal = (cp: CheckpointInfo) => {
-    const exists = checkpoints.some((c) => c.id === cp.id);
-    if (!exists) {
-      setCheckpoints([cp, ...checkpoints].sort((a, b) => b.createdAt - a.createdAt));
     }
   };
 

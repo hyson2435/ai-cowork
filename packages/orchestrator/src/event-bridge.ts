@@ -93,6 +93,8 @@ export function mapEvent(
           readFile(pathResolve(ctx.cwd, args.path), "utf-8")
             .then((content) => {
               pendingFileReads.push({ sessionId, path: args.path!, content, toolCallId: e.toolCallId, kind: "edit", agent });
+              // ★ 触发兜底 flush：确保异步 readFile 完成后 pending 事件不被丢失
+              scheduleFallbackFlush();
             })
             .catch(() => {});
         }
@@ -154,10 +156,54 @@ function deriveFromToolStart(
   return [];
 }
 
-/** 把 pendingFileReads 里的内容转成 file.changed 事件并清空队列。供 server 在 broadcast 后调用。 */
-export function flushPendingFileReads(): Array<Omit<PendingFileRead, "agent"> & { agent: AgentRole }> {
+/**
+ * 把 pendingFileReads 里的内容转成 file.changed 事件并清空队列。
+ * ★ BUG 修复：pendingFileReads 是 module 级全局数组，跨所有 session 共享。
+ *   之前 flushPendingFileReads() 一次性排空全部，导致 session A 的 subscribe 回调
+ *   会拿到 session B 的异步 readFile 结果，把 B 的文件加进 A 的 changedFiles，
+ *   造成跨 session 污染 + B session 漏审。
+ *   修复：传入 sessionId 时只取并移除该 session 的 pending，不传则排空全部（兜底用）。
+ */
+export function flushPendingFileReads(sessionId?: string): Array<Omit<PendingFileRead, "agent"> & { agent: AgentRole }> {
   if (pendingFileReads.length === 0) return [];
+  if (sessionId) {
+    const mine: PendingFileRead[] = [];
+    const others: PendingFileRead[] = [];
+    for (const p of pendingFileReads) {
+      if (p.sessionId === sessionId) mine.push(p);
+      else others.push(p);
+    }
+    if (mine.length === 0) return [];
+    // 重建数组只保留其他 session 的
+    pendingFileReads.length = 0;
+    for (const o of others) pendingFileReads.push(o);
+    return mine;
+  }
+  // 不传 sessionId：排空全部（兜底 flush 用）
   const out = [...pendingFileReads];
   pendingFileReads.length = 0;
   return out;
+}
+
+// ★ flush 兜底定时器：edit 工具的 readFile 是异步的，可能在最后一个 pi 事件
+//   （如 agent_end）flush 之后才完成 push，导致 file.changed 事件丢失。
+//   每次 push 时启 0ms timer，确保下一 tick 一定再 flush 一次。
+//   旧的设计只在 subscribe 回调末尾 flush，turn 短时 readFile 来不及就会丢事件。
+let flushSubscriber: ((events: Array<Omit<PendingFileRead, "agent"> & { agent: AgentRole }>) => void) | null = null;
+
+/** 注册 flush 回调（由 SessionRegistry 启动时注册，用于把 pending 事件广播出去） */
+export function registerPendingFlushSubscriber(
+  cb: (events: Array<Omit<PendingFileRead, "agent"> & { agent: AgentRole }>) => void,
+): void {
+  flushSubscriber = cb;
+}
+
+/** schedule 一次兜底 flush（push 后调用，确保异步 readFile 完成后能被 flush） */
+function scheduleFallbackFlush(): void {
+  setTimeout(() => {
+    const pending = flushPendingFileReads();
+    if (pending.length > 0 && flushSubscriber) {
+      flushSubscriber(pending);
+    }
+  }, 0);
 }

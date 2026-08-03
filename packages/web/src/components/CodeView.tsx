@@ -1,5 +1,5 @@
 import Editor from "@monaco-editor/react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store";
 
 type EditorInstance = Parameters<NonNullable<Parameters<typeof Editor>[0]["onMount"]>>[0];
@@ -14,6 +14,11 @@ export function CodeView() {
   const editorRef = useRef<EditorInstance | null>(null);
   const monacoRef = useRef<MonacoInstance | null>(null);
   const decorationsRef = useRef<string[]>([]);
+  // ★ BUG 修复：editorRef/monacoRef 是 ref，赋值不触发 re-render，也不在 effect 依赖里。
+  //   首次挂载时 effect 同步执行，editorRef.current 为 null 直接 return，diff 高亮丢失。
+  //   Monaco 异步加载后 onMount 赋值 ref，但 content/diffLines/currentPath 未变，effect 不再运行。
+  //   修复：引入 editorReady state，onMount 末尾 setEditorReady(true)，加入 effect 依赖。
+  const [editorReady, setEditorReady] = useState(false);
 
   const content = currentPath ? fileContents[currentPath] ?? "" : "";
   const diffLines = currentPath ? fileDiffLines[currentPath] ?? [] : [];
@@ -26,11 +31,6 @@ export function CodeView() {
     const editor = editorRef.current;
     const monaco = monacoRef.current;
     if (!editor || !monaco) return;
-    // ★ B18：切文件时先用空 decorations 清掉上一文件残留高亮，避免切换瞬间看到旧高亮闪一下
-    //   deltaDecorations 第一个参数传当前 decorationsRef（旧文件的），第二个传新文件的 decos
-    //   Monaco 会自动 diff 旧→新并移除多余的；这里显式传 [] 再传 decos 是双重保险，
-    //   保证 currentPath 变化时第一时间清空。
-    decorationsRef.current = editor.deltaDecorations(decorationsRef.current, []);
     const decos = diffLines.map((ln) => ({
       range: new monaco.Range(ln + 1, 1, ln + 1, 1),
       options: {
@@ -39,8 +39,9 @@ export function CodeView() {
         linesDecorationsClassName: "diff-glyph",
       },
     }));
+    // deltaDecorations 本身就是 diff 更新（旧→新），一次调用即可
     decorationsRef.current = editor.deltaDecorations(decorationsRef.current, decos);
-  }, [content, diffLines, currentPath]);
+  }, [content, diffLines, currentPath, editorReady]);
 
   // 文件变更时：有 diff 行就跳到第一处变更，否则滚到顶部
   useEffect(() => {
@@ -52,7 +53,7 @@ export function CodeView() {
         editorRef.current.setScrollTop(0);
       }
     }
-  }, [lastChangedPath, lastChangedToolCallId, currentPath, diffLines]);
+  }, [lastChangedPath, lastChangedToolCallId, currentPath, diffLines, editorReady]);
 
   if (!currentPath) {
     return (
@@ -81,6 +82,7 @@ export function CodeView() {
           onMount={(editor, monaco) => {
             editorRef.current = editor;
             monacoRef.current = monaco;
+            setEditorReady(true);
           }}
           options={{
             readOnly: true,

@@ -12,7 +12,7 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import { getModel, type Model } from "@mariozechner/pi-ai";
 import type { ServerEvent, FileEntry, CheckpointInfo, PreviewInfo, PermissionMode } from "@ai-cowork/shared";
-import { mapEvent, flushPendingFileReads, type BridgeContext } from "./event-bridge.js";
+import { mapEvent, flushPendingFileReads, registerPendingFlushSubscriber, type BridgeContext } from "./event-bridge.js";
 import { config } from "./config.js";
 import * as CP from "./checkpoints.js";
 import * as PV from "./preview-server.js";
@@ -67,6 +67,23 @@ export class SessionRegistry {
 
   constructor(broadcast: (event: ServerEvent) => void) {
     this.broadcast = broadcast;
+    // ★ 注册 pendingFileReads 兜底 flush 回调：
+    //   edit 工具的 readFile 是异步的，可能在最后一个 pi 事件 flush 之后才完成 push。
+    //   这里注册一个 subscriber，当 scheduleFallbackFlush 触发时，把 pending 事件广播出去。
+    registerPendingFlushSubscriber((events) => {
+      for (const p of events) {
+        const ev: ServerEvent = {
+          sessionId: p.sessionId,
+          type: "file.changed",
+          agent: p.agent,
+          path: p.path,
+          kind: p.kind,
+          content: p.content,
+          toolCallId: p.toolCallId,
+        };
+        this.broadcast(ev);
+      }
+    });
   }
 
   async start(opts: StartOptions): Promise<{ sessionId: string; model?: string; reviewer?: boolean; permissionMode: PermissionMode }> {
@@ -164,11 +181,18 @@ export class SessionRegistry {
         // coder 每次 turn 结束，如果 reviewer 存在就触发一次审查
         if (ev.type === "turn_end" && ev.agent === "coder") {
           const snap = [...changedFiles];
+          // ★ BUG 修复：之前 changedFiles.clear() 后 entryRef.turnChangedFiles 也空了
+          //   （两者是同一 Set 引用），导致 buildCopilotContext 永远拿不到最近变更文件。
+          //   修复：先把本轮改的文件快照存到 turnChangedFiles（覆盖上一轮），再 clear。
+          if (entryRef) entryRef.turnChangedFiles = new Set(snap);
           changedFiles.clear();
           const ent = this.sessions.get(sessionId);
           // abort 后的 turn_end 不触发 reviewer（代码不完整）
           if (ent?.aborted) {
             ent.aborted = false;
+            // ★ BUG 修复：abort 路径也要清空 coderTurnText，否则下一轮 plan 提取会
+            //   拼接上一轮被 abort 的半截文本（plan 模式下写工具被拦截 → abort → turn_end 走此分支）
+            coderTurnText = "";
           } else if (ent && ent.permissionMode === "plan" && ent.planState?.phase !== "approved") {
             // plan 模式且尚未批准：提取 Coder 输出的计划，广播待批准，不触发 reviewer
             const planText = coderTurnText.trim();
@@ -191,8 +215,8 @@ export class SessionRegistry {
           }
         }
       }
-      // flush edit 工具异步读到的文件内容
-      const pending = flushPendingFileReads();
+      // flush edit 工具异步读到的文件内容（★ 按 sessionId 过滤，避免跨 session 污染）
+      const pending = flushPendingFileReads(sessionId);
       for (const p of pending) {
         const ev: ServerEvent = {
           sessionId: p.sessionId,
@@ -305,7 +329,8 @@ export class SessionRegistry {
     const reviewerUnsub = reviewerSession.subscribe((e) => {
       const mapped = mapEvent(sessionId, e, ctx, "reviewer");
       for (const ev of mapped) this.broadcast(ev);
-      const pending = flushPendingFileReads();
+      // ★ 按 sessionId 过滤，避免跨 session 污染
+      const pending = flushPendingFileReads(sessionId);
       for (const p of pending) {
         this.broadcast({
           sessionId: p.sessionId,
@@ -413,8 +438,14 @@ export class SessionRegistry {
           message: err instanceof Error ? err.message : String(err),
         });
       } finally {
-        entry.reviewer.busy = false;
-        this.emitCopilotStatus(sessionId);
+        // ★ BUG 修复：dispose 期间 entry.reviewer 可能被置为 undefined，
+        //   此时访问 .busy 会抛 TypeError 并掩盖真实异常。
+        //   重新取 entry 并检查 reviewer 是否还存在。
+        const ent2 = this.sessions.get(sessionId);
+        if (ent2?.reviewer) {
+          ent2.reviewer.busy = false;
+          this.emitCopilotStatus(sessionId);
+        }
       }
     }
   }
@@ -451,6 +482,11 @@ export class SessionRegistry {
     // 60s 超时兜底（之前是 120s，过长；reviewer 正常几秒就完事）
     let timer: NodeJS.Timeout | null = setTimeout(() => {
       if (resolveFn) { const r = resolveFn; resolveFn = null; r(); }
+      // ★ BUG 修复：超时后 reviewer 底层 prompt 仍在运行，下一轮 prompt 会与之重叠，
+      //   导致输出串台（新 collector 订阅到上一轮延迟的 text_delta）。
+      //   超时后主动 abort，确保 reviewer 真正停止再进入下一任务。
+      const ent = this.sessions.get(sessionId);
+      ent?.reviewer?.session.abort().catch(() => {});
     }, 60000);
     const donePromise = new Promise<void>((resolve) => { resolveFn = resolve; });
     return {
@@ -515,7 +551,20 @@ export class SessionRegistry {
         "请阅读相关文件并修复上述严重问题，修复后正常回复。",
       ].join("\n");
       try {
-        await entry.session.followUp(fmsg);
+        // ★ 与 copilotApply/planApprove 同理：Coder 在 turn_end 后已空闲，
+        //   followUp 只在 Agent 运行中排队（pi 文档：followUp = "Queue a follow-up
+        //   message to be processed after the agent finishes"），空闲时调用不会
+        //   触发新 turn，严重 bug 永远不会被自动修复。
+        //   修复：用 wakeCoder 自适应——运行中用 followUp 排队（不打断当前 turn），
+        //   空闲时用 prompt 主动触发新 turn 开始修复。
+        //   注意：这里不能用 steer，steer 会在当前 turn 工具调用后立即注入，
+        //   可能打断 Coder 正在做的连续操作；followUp 等当前完全结束更安全。
+        const isRunning = !!(entry.session.agent.state as { streamingMessage?: unknown }).streamingMessage;
+        if (isRunning) {
+          await entry.session.followUp(fmsg);
+        } else {
+          await entry.session.prompt(fmsg);
+        }
       } catch (err) {
         this.broadcast({
           sessionId,
@@ -684,23 +733,32 @@ export class SessionRegistry {
     const entry = this.sessions.get(sessionId);
     if (!entry) throw new Error(`session not found: ${sessionId}`);
 
+    // 实际使用的注入方式（用于事件上报，避免上报与实际行为不符）
+    let actualMode: "steer" | "prompt";
     if (mode === "prompt") {
       // 用户显式指定用 prompt
       await entry.session.prompt(instruction);
+      actualMode = "prompt";
+    } else if (mode === "steer") {
+      // 用户显式指定用 steer（注意：Coder 空闲时 steer 不会触发新 turn，但尊重用户选择）
+      await entry.session.steer(instruction);
+      actualMode = "steer";
     } else {
       // 自动判断：Coder 运行中用 steer 插队，空闲用 prompt 触发新 turn
       const isRunning = !!(entry.session.agent.state as { streamingMessage?: unknown }).streamingMessage;
       if (isRunning) {
         await entry.session.steer(instruction);
+        actualMode = "steer";
       } else {
         await entry.session.prompt(instruction);
+        actualMode = "prompt";
       }
     }
     this.broadcast({
       sessionId,
       type: "copilot.applied",
       instruction,
-      mode: mode ?? "auto",
+      mode: actualMode,
     });
   }
 
@@ -729,16 +787,33 @@ export class SessionRegistry {
       );
     } else if (decision === "rejected") {
       entry.planState = null;
-      await entry.session.steer(
-        "【计划被拒绝】用户拒绝了你的计划。请重新理解需求，输出一份新的计划。仍然只能只读探索，不要尝试修改文件。",
-      );
+      // ★ 与 copilotApply 同理：plan 模式下 Coder 输出计划后 turn 已结束、Coder 空闲，
+      //   steer 不会唤醒空闲 Coder（pi 文档：steer = "Queue a steering message while the agent is running"）。
+      //   之前用 steer → 用户点"拒绝"后 Coder 完全无响应。修复：空闲时改用 prompt 触发新 turn。
+      await this.wakeCoder(sessionId, "【计划被拒绝】用户拒绝了你的计划。请重新理解需求，输出一份新的计划。仍然只能只读探索，不要尝试修改文件。");
     } else {
       // iterate：要求修改
       const fb = feedback || "请调整计划";
       entry.planState = null;
-      await entry.session.steer(
-        `【计划需修改】用户要求调整计划，反馈如下：${fb}\n请基于反馈输出修改后的新计划。仍然只读，不要修改文件。`,
-      );
+      // ★ 同上：Coder 空闲时用 prompt 而非 steer
+      await this.wakeCoder(sessionId, `【计划需修改】用户要求调整计划，反馈如下：${fb}\n请基于反馈输出修改后的新计划。仍然只读，不要修改文件。`);
+    }
+  }
+
+  /**
+   * 唤醒 Coder：运行中用 steer 插队，空闲用 prompt 触发新 turn。
+   * ★ 与 copilotApply 的自动判断逻辑一致，提取为复用方法。
+   *   steer 只在 Agent 运行中才生效，空闲时 steer 的消息会卡在队列里，
+   *   Coder 不会主动醒来处理。空闲时必须用 prompt 主动触发新 turn。
+   */
+  private async wakeCoder(sessionId: string, message: string): Promise<void> {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) throw new Error(`session not found: ${sessionId}`);
+    const isRunning = !!(entry.session.agent.state as { streamingMessage?: unknown }).streamingMessage;
+    if (isRunning) {
+      await entry.session.steer(message);
+    } else {
+      await entry.session.prompt(message);
     }
   }
 
@@ -773,7 +848,13 @@ export class SessionRegistry {
   dispose(sessionId: string): void {
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
-    PV.stopPreview(sessionId).catch(() => {});
+    // ★ BUG 修复：dispose 时若 preview 在运行，必须广播 preview.stopped，
+    //   否则前端面板一直显示"预览运行中"而实际 server 已关闭，
+    //   server.ts 的 clearPreviewTimer 也依赖该事件清理 debounce timer。
+    if (PV.getPreview(sessionId)) {
+      PV.stopPreview(sessionId).catch(() => {});
+      this.broadcast({ sessionId, type: "preview.stopped" });
+    }
     // ★ 释放 Reviewer session（之前漏了，会导致 session 泄漏：pi 内部状态 + 订阅 + 可能的 socket）
     if (entry.reviewer) {
       entry.reviewer.unsubscribe();

@@ -2,6 +2,22 @@ import { create } from "zustand";
 import type { FileEntry, CheckpointInfo, PreviewInfo, CopilotMessage, CopilotStatus, AgentRole, PermissionMode } from "@ai-cowork/shared";
 
 /**
+ * 生成唯一 id：crypto.randomUUID 需要安全上下文（https/localhost），
+ * 在预览代理或 http 部署下可能不可用，做兜底（与 ws.ts 的 genId 同逻辑）。
+ * 不能直接 import ws.ts 的 genId，会形成循环依赖（ws.ts 反向 import store）。
+ */
+function safeUUID(): string {
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+  } catch {
+    // 忽略，走兜底
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
  * 计算新旧文本之间的行级 diff，返回「新文本中新增/修改行」的 0-based 行号数组。
  * 用 LCS 做行级比对。
  *
@@ -235,14 +251,21 @@ export const useStore = create<CoworkState>((set, get) => ({
   addTerminalLine: (line) =>
     set({ terminalLines: [...get().terminalLines, line] }),
   setCheckpoints: (cps) => set({ checkpoints: cps }),
-  addCheckpoint: (cp) => set({ checkpoints: [cp, ...get().checkpoints].sort((a, b) => b.createdAt - a.createdAt) }),
+  // ★ 去重：CheckpointPanel.create() 在拿到 response 后会先本地 addCheckpointLocal，
+  //   紧接着 checkpoint.created 事件也会触发本方法。若不去重，同一 cp 会被加入两次。
+  //   按 id 去重，已存在则保持原顺序不变。
+  addCheckpoint: (cp) =>
+    set((state) => {
+      if (state.checkpoints.some((c) => c.id === cp.id)) return {};
+      return { checkpoints: [cp, ...state.checkpoints].sort((a, b) => b.createdAt - a.createdAt) };
+    }),
   setPreview: (p) => set({ preview: p }),
   bumpPreviewRev: () => set({ previewRev: get().previewRev + 1 }),
   addCopilotUserMessage: (text) =>
     set({
       copilotMessages: [
         ...get().copilotMessages,
-        { id: crypto.randomUUID(), role: "user", text, ts: Date.now() },
+        { id: safeUUID(), role: "user", text, ts: Date.now() },
       ],
     }),
   addCopilotReply: (msg) => set({ copilotMessages: [...get().copilotMessages, msg] }),
@@ -267,5 +290,16 @@ export const useStore = create<CoworkState>((set, get) => ({
       return { planState: null };
     }),
   clearPlan: () => set({ planState: null }),
-  clear: () => set({ log: [], terminalLines: [], checkpoints: [], preview: null, previewRev: 0, reviewer: false, permissionMode: "free", copilotMessages: [], copilotStatus: "idle", copilotQueuePosition: 0, copilotCurrentTask: null, copilotQueueLength: 0, fileContents: {}, fileDiffLines: {}, lastChangedPath: null, lastChangedToolCallId: null, currentPath: null, planState: null }),
+  // ★ BUG 修复：clear 之前漏重置 isStreaming/steeringCount/followUpCount/sessionId/model/files，
+  //   导致启动新 session 时残留上一 session 的状态（如 isStreaming=true 卡住 UI）。
+  //   现在完整重置所有业务字段，sessionId/model 清空让 App.tsx 显示启动表单。
+  clear: () => set({
+    log: [], terminalLines: [], checkpoints: [], preview: null, previewRev: 0,
+    reviewer: false, permissionMode: "free",
+    copilotMessages: [], copilotStatus: "idle", copilotQueuePosition: 0, copilotCurrentTask: null, copilotQueueLength: 0,
+    fileContents: {}, fileDiffLines: {}, lastChangedPath: null, lastChangedToolCallId: null, currentPath: null,
+    planState: null,
+    sessionId: null, model: undefined, isStreaming: false, steeringCount: 0, followUpCount: 0,
+    files: [],
+  }),
 }));

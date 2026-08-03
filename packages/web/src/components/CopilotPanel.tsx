@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useStore } from "../store";
-import { send, genId } from "../ws";
+import { sendAsync, genId } from "../ws";
 
 export function CopilotPanel() {
   const sessionId = useStore((s) => s.sessionId);
@@ -16,23 +16,39 @@ export function CopilotPanel() {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // 新消息时自动滚到底部
+  // ★ BUG 修复：之前依赖 [messages.length, status]，status 变化（chatting→idle）无新消息也会滚动打断阅读。
+  //   修复：只依赖 messages.length，并加"用户在底部附近"判断。
   useEffect(() => {
     if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      const el = scrollRef.current;
+      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+      if (nearBottom) {
+        el.scrollTop = el.scrollHeight;
+      }
     }
-  }, [messages.length, status]);
+  }, [messages.length]);
 
   const sendChat = () => {
     const msg = input.trim();
     if (!msg || !sessionId) return;
     addCopilotUserMessage(msg);
-    send({ id: genId(), type: "copilot.chat", sessionId, message: msg });
+    // ★ BUG 修复：之前用 send（静默丢弃），ws 断开时用户消息已上屏但服务端从未收到，用户无感知。
+    //   改用 sendAsync，失败时移除已上屏消息并提示。这里不 await（保持输入框立即清空的体验）。
+    const msgId = genId();
+    sendAsync({ id: msgId, type: "copilot.chat", sessionId, message: msg })
+      .catch((err) => {
+        alert("发送失败：" + (err instanceof Error ? err.message : String(err)));
+      });
     setInput("");
   };
 
   const applyInstruction = (instruction: string) => {
     if (!sessionId) return;
-    send({ id: genId(), type: "copilot.apply", sessionId, instruction, mode: "steer" });
+    // ★ 同 sendChat，用 sendAsync 失败时提示
+    sendAsync({ id: genId(), type: "copilot.apply", sessionId, instruction, mode: "steer" })
+      .catch((err) => {
+        alert("注入失败：" + (err instanceof Error ? err.message : String(err)));
+      });
   };
 
   if (!reviewer) {

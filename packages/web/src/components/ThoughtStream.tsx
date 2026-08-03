@@ -73,6 +73,7 @@ function kindOf(e: LogEntry): KindFilter {
 export function ThoughtStream() {
   const log = useStore((s) => s.log);
   const endRef = useRef<HTMLDivElement>(null);
+  const streamRef = useRef<HTMLDivElement>(null);
   const [search, setSearch] = useState("");
   const [agentFilter, setAgentFilter] = useState<AgentFilter>("all");
   const [kindFilter, setKindFilter] = useState<KindFilter>("all");
@@ -87,9 +88,17 @@ export function ThoughtStream() {
     });
   }, [log, search, agentFilter, kindFilter]);
 
+  // ★ BUG 修复：之前依赖 [log]，即使新日志被 filter 过滤掉也会 scrollIntoView 打断阅读，
+  //   且 smooth 动画在 thinking_delta 高频到达时叠加卡顿。
+  //   修复：依赖 filtered，用容器级 scrollTop，只在用户已在底部附近时才自动滚。
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [log]);
+    const stream = streamRef.current;
+    if (!stream) return;
+    const nearBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 80;
+    if (nearBottom) {
+      stream.scrollTop = stream.scrollHeight;
+    }
+  }, [filtered]);
 
   return (
     <div className="thought-stream">
@@ -127,7 +136,7 @@ export function ThoughtStream() {
           {filtered.length}{filtered.length !== log.length ? `/${log.length}` : ""} 条
         </div>
       </div>
-      <div className="stream">
+      <div className="stream" ref={streamRef}>
         {filtered.length === 0 && (
           <div className="empty">{log.length === 0 ? "等待 Agent 输出…" : "无匹配日志"}</div>
         )}

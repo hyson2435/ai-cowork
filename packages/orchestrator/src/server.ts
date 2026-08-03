@@ -26,6 +26,15 @@ const clients = new Set<WebSocket>();
 // preview.updated 的简单 debounce：sessionId -> timer，避免一次写入刷 10 次 iframe
 const previewTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+/** 清理指定 session 的 preview debounce timer（preview.stop / dispose 时调用） */
+function clearPreviewTimer(sessionId: string): void {
+  const t = previewTimers.get(sessionId);
+  if (t) {
+    clearTimeout(t);
+    previewTimers.delete(sessionId);
+  }
+}
+
 const broadcast = (event: ServerEvent) => {
   const msg = JSON.stringify(event);
   for (const c of clients) {
@@ -34,6 +43,13 @@ const broadcast = (event: ServerEvent) => {
     } catch {
       // 连接已断开，忽略
     }
+  }
+  // ★ preview.stopped / session 销毁时清理 debounce timer，避免：
+  //   1. timer 泄漏（session 关闭后 timer 仍挂在 Map 里）
+  //   2. preview 停止后仍可能触发一次空的 preview.updated 广播
+  if (event.type === "preview.stopped") {
+    clearPreviewTimer(event.sessionId);
+    return;
   }
   // 如果是 file.changed 且该 session 有 preview 在跑，debounce 发 preview.updated
   if (event.type === "file.changed") {
@@ -111,22 +127,53 @@ fastify.get(
           // fastify header 接受 string | string[]；upRes.headers 的值类型正确
           reply.header(k, v as never);
         }
-        upRes.on("data", (chunk) => reply.raw.write(chunk));
+        // ★ BUG 修复：客户端断开后 reply.raw 已销毁，write/end 会抛错或触发 error 事件。
+        //   之前未监听 reply.raw 的 error，可能导致进程崩溃。
+        //   修复：写入前检查 destroyed，并监听 error 吞掉（连接已断无需处理）。
+        const safeWrite = (chunk: Buffer): boolean => {
+          if (reply.raw.destroyed || reply.raw.writableEnded) return false;
+          try {
+            return reply.raw.write(chunk);
+          } catch {
+            return false;
+          }
+        };
+        upRes.on("data", (chunk) => safeWrite(chunk));
         upRes.on("end", () => {
-          reply.raw.end();
+          if (!reply.raw.destroyed && !reply.raw.writableEnded) {
+            try { reply.raw.end(); } catch { /* 忽略 */ }
+          }
+          resolve();
+        });
+        upRes.on("error", () => {
+          if (!reply.raw.destroyed && !reply.raw.writableEnded) {
+            try { reply.raw.end(); } catch { /* 忽略 */ }
+          }
           resolve();
         });
       });
       // ★ socket 超时触发后主动 destroy，让 upRes/end 永不触发 → 兜底回 504
+      let settled = false;
       proxyReq.on("timeout", () => {
         proxyReq.destroy(new Error("preview upstream timeout"));
       });
       proxyReq.on("error", (err) => {
-        // ★ 脱敏：只暴露通用错误类别，不泄露内部路径
+        // ★ BUG 修复：若 upRes 已开始写（headers/body 部分已发），reply.code(502).send 会抛
+        //   FST_ERR_REP_ALREADY_SENT。用 settled 标志保护，已 settled 则只 end raw 不再 send。
+        if (settled) return;
+        settled = true;
+        // 脱敏：只暴露通用错误类别，不泄露内部路径
         const msg = err.message.includes("timeout") ? "preview upstream timeout" : "preview upstream error";
-        reply.code(502).send(msg);
+        if (!reply.raw.headersSent && !reply.raw.writableEnded) {
+          reply.code(502).send(msg);
+        } else if (!reply.raw.writableEnded) {
+          try { reply.raw.end(); } catch { /* 忽略 */ }
+        }
         resolve();
       });
+      // upRes 的 end/error 也要设 settled，防止 timeout 后 upRes 仍触发 resolve 二次调用
+      const markSettled = () => { settled = true; };
+      proxyReq.on("response", markSettled);
       proxyReq.end();
     });
   },
@@ -137,12 +184,15 @@ fastify.get("/ws", { websocket: true }, (connection, req) => {
   const socket = (connection as WebSocket & { socket?: WebSocket }).socket ?? (connection as WebSocket);
   // ★ WS 鉴权
   //   - 配了 authToken：query 里 ?token=xxx 必须匹配
-  //   - 没配 authToken：只允许本机回环连接
+  //   - 没配 authToken：只允许本机回环连接（仅靠 peer IP 判断，Host 头可被客户端伪造，不能用作身份凭证）
   const query = (req.url ?? "").split("?")[1] ?? "";
   const params = new URLSearchParams(query);
   const token = params.get("token");
+  // ★ req.socket 是 http 升级请求的 net.Socket，直接取 remoteAddress 即可。
+  //   之前写 req.socket.socket?.remoteAddress 是误用了 fastify-websocket 的 connection.socket 形式，
+  //   实际 req.socket 已经是底层 Socket，访问 .socket 属性会触发 TS 编译错误。
   const peerAddr = req.socket.remoteAddress ?? "";
-  const isLoopback = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(peerAddr) || /localhost/i.test(req.headers.host ?? "");
+  const isLoopback = ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(peerAddr);
   if (config.authToken) {
     if (token !== config.authToken) {
       try { socket.close(4001, "unauthorized"); } catch {}
@@ -293,15 +343,20 @@ async function handleCommand(cmd: ClientCommand, reply: (r: CommandResponse) => 
 /** 错误脱敏：业务错误保留，含敏感信息的内部错误统一回 internal error */
 function sanitizeError(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
-  // 简单启发式：含绝对路径 / 堆栈标志 / ECONNREFUSED 等系统错误 → 视为内部错误
-  if (/\/(home|usr|var|tmp|root)\//.test(msg) || /\b(Error|ENOENT|EACCES|ECONNREFUSED):\s/.test(msg) || msg.includes("at ")) {
+  // 简单启发式：含绝对路径 / 系统错误码 / 堆栈帧 → 视为内部错误
+  // ★ BUG 修复：之前用 msg.includes("at ") 误判正常业务消息（如 "no file at the moment"）。
+  //   堆栈帧格式是 "\n    at Function.name (file:line:col)"，用更精确的正则。
+  if (/\/(home|usr|var|tmp|root)\//.test(msg) || /\b(ENOENT|EACCES|ECONNREFUSED):\s/.test(msg) || /\n\s+at\s+\S+\s+\(/.test(msg)) {
     return "internal error (see server logs)";
   }
   return msg;
 }
 
-// 优雅退出
+// 优雅退出（去重，避免二次 Ctrl+C 触发 fastify.close() 二次调用抛错）
+let shuttingDown = false;
 const shutdown = (sig: string) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
   fastify.log.info({ sig }, "shutting down");
   registry.disposeAll();
   fastify.close().then(() => process.exit(0));
@@ -314,7 +369,9 @@ if (!config.anthropicKey && !config.openaiKey && !config.deepseekKey) {
 }
 
 // ★ 安全提示：未设 token 且监听非回环时，启动期高亮警告
-if (!config.authToken && config.host !== "127.0.0.1" && config.host !== "localhost") {
+//   回环地址集合与 WS 鉴权的 isLoopback 保持一致（127.0.0.1 / localhost / ::1 / ::ffff:127.0.0.1）
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "::ffff:127.0.0.1"]);
+if (!config.authToken && !LOOPBACK_HOSTS.has(config.host)) {
   fastify.log.warn("⚠️  HOST=0.0.0.0 但未设置 AICOWORK_AUTH_TOKEN：任何人都能连上 /ws 调用 Agent，强烈建议设置 token！");
 }
 

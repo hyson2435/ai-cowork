@@ -9,7 +9,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 process.chdir(join(__dirname, "..")); // 切到 orchestrator 目录以便 import .js dist（如果是 ts 用 tsx 跑的话其实 src 也可以）
 
 // import 编译后的 dist（build 脚本已跑完）
-const CP = await import("./dist/checkpoints.js");
+const CP = await import("../dist/checkpoints.js");
 
 const CWD = "/tmp/aicowork-checkpoint-test";
 const dataDir = join(CWD, "data");

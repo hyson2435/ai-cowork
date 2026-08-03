@@ -1,6 +1,6 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useStore } from "../store";
-import { send, genId } from "../ws";
+import { sendAsync, genId } from "../ws";
 
 /**
  * 计划审批面板。
@@ -98,6 +98,16 @@ export function PlanApprovalPanel() {
   // ★ B8 防重入：决策发出后立即禁用所有按钮，避免连点触发多次 plan.approve
   const [submitting, setSubmitting] = useState(false);
 
+  // ★ BUG 修复：组件在 App.tsx 常驻渲染（sessionId 存在即挂载），planState 变 null 时
+  //   只 return null 不卸载，React 保留 state。第一次提案 submitting=true 后计划消失，
+  //   第二次提案 submitting 仍为 true → 按钮永久禁用。mode/feedback 同理残留。
+  //   修复：planState 变化时（新提案/变 approved/被清空）重置本地状态。
+  useEffect(() => {
+    setSubmitting(false);
+    setMode("buttons");
+    setFeedback("");
+  }, [planState]);
+
   // ★ B13 修正 useMemo 依赖：用 planState 整体（而非可选链 planState?.plan），
   //   避免 lint 警告和严格模式下漏更新
   const blocks = useMemo(
@@ -128,18 +138,25 @@ export function PlanApprovalPanel() {
   }
 
   // proposing：模态弹层
-  const sendDecision = (decision: "approved" | "rejected" | "iterate", fb?: string) => {
+  const sendDecision = async (decision: "approved" | "rejected" | "iterate", fb?: string) => {
     if (submitting) return; // 防重入
     setSubmitting(true);
-    send({
-      id: genId(),
-      type: "plan.approve",
-      sessionId,
-      decision,
-      feedback: fb,
-    });
-    setMode("buttons");
-    setFeedback("");
+    // ★ BUG 修复：之前用 send（静默丢弃），ws 断开时命令丢失、submitting 永远 true、模态卡死。
+    //   改用 sendAsync：ws 断开或服务端报错时 reject，catch 里重置 submitting 并提示用户。
+    try {
+      await sendAsync({
+        id: genId(),
+        type: "plan.approve",
+        sessionId,
+        decision,
+        feedback: fb,
+      });
+      setMode("buttons");
+      setFeedback("");
+    } catch (err) {
+      setSubmitting(false);
+      alert("操作失败：" + (err instanceof Error ? err.message : String(err)));
+    }
   };
 
   return (

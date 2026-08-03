@@ -7,13 +7,36 @@ import { WebSocket, WebSocketServer } from "ws";
 import { spawn } from "node:child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const ROOT = join(__dirname, "..", "..");
+// 脚本在 packages/orchestrator/tests/ 下，需要向上 3 级才到项目根目录
+const ROOT = join(__dirname, "..", "..", "..");
 process.chdir(ROOT);
 
 const SE = await import(join(ROOT, "packages/shared/dist/index.js"));
 const {
-  ServerEvent, parseSeverity, parseReviewedFiles, parseSummary, AgentRole,
+  ServerEvent, AgentRole,
 } = SE;
+
+// smoke 测试用到的 review 解析 helper（parseSeverity/parseReviewedFiles/parseSummary）
+// 在 shared 包里没导出，这里内联实现，避免引用不存在的函数。
+// ★ 解析格式必须与 orchestrator/session-registry.ts 的 executeReview 实际输出格式一致：
+//     SEVERE=YES|NO / SUMMARY=<一句话意见> / FILES=<逗号分隔文件>
+//   之前误写成 SEVERITY（多了一个 I），且返回字符串而非 boolean，导致单元测试全部失败。
+function parseSeverity(text) {
+  const m = String(text).match(/SEVERE\s*=\s*(YES|NO)/i);
+  return m ? m[1].toUpperCase() === "YES" : false;
+}
+function parseReviewedFiles(text) {
+  const m = String(text).match(/FILES?\s*[:=]\s*([^\n]+)/i);
+  if (!m) return [];
+  return m[1].split(/[,，]\s*/).map(s => s.trim()).filter(Boolean);
+}
+function parseSummary(text) {
+  // 与 orchestrator 实际逻辑一致：提取 SUMMARY=<内容> 行；找不到则取首行
+  const m = String(text).match(/SUMMARY\s*=\s*(.+)/i);
+  if (m) return m[1].trim();
+  const lines = String(text).split(/\r?\n/).filter(Boolean);
+  return lines[0] ? lines[0].slice(0, 120) : "";
+}
 
 const CWD = "/tmp/aicowork-smoke-reviewer2-" + randomUUID().slice(0, 6);
 const SERVER_PORT = 3013;
