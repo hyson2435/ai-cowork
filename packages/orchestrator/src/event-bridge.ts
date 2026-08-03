@@ -30,8 +30,25 @@ export function mapEvent(
       return [{ sessionId, type: "agent_end", agent }];
     case "turn_start":
       return [{ sessionId, type: "turn_start", agent }];
-    case "turn_end":
+    case "turn_end": {
+      // ★ pi 没有 error 事件，错误通过 turn_end.message.stopReason === "error" 传递
+      //   之前没读 stopReason，错误信息被吞掉，前端只看到生命周期事件快速结束（"没反应"）
+      const msg = e.message as { stopReason?: string; errorMessage?: string } | undefined;
+      if (msg?.stopReason === "error" || msg?.stopReason === "aborted") {
+        const errMsg = msg.errorMessage ?? "(no error message)";
+        return [
+          { sessionId, type: "turn_end", agent },
+          {
+            sessionId,
+            agent,
+            type: "error",
+            code: "E_TURN",
+            message: msg.stopReason === "aborted" ? `Agent aborted: ${errMsg}` : `Agent error: ${errMsg}`,
+          },
+        ];
+      }
       return [{ sessionId, type: "turn_end", agent }];
+    }
     case "message_start":
       return [{ sessionId, type: "message_start", agent, role: (e.message as { role?: string })?.role ?? "assistant" }];
     case "message_end":
