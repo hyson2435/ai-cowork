@@ -1,3 +1,7 @@
+// ★ 必须在读取 process.env 之前加载 .env 文件
+//   之前项目让用户配 .env 但代码没加载，导致 API Key 永远读不到（E_PROMPT bug）
+import "dotenv/config";
+
 /** 运行配置，从环境变量读取。 */
 function parsePort(raw: string | undefined, def: number): number {
   if (raw === undefined || raw === "") return def;
