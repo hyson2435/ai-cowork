@@ -1,0 +1,26 @@
+{
+  "name": "ai-cowork",
+  "private": true,
+  "version": "0.0.1",
+  "description": "基于 LLM 的结对编程工作台：Coder + Reviewer 双 Agent，配合计划审批、快照回滚、危险命令拦截",
+  "license": "MIT",
+  "keywords": [
+    "ai-coding",
+    "pair-programming",
+    "llm",
+    "agent",
+    "code-review",
+    "coder",
+    "reviewer"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "dev:orch": "npm run dev -w @ai-cowork/orchestrator",
+    "dev:web": "npm run dev -w @ai-cowork/web",
+    "build:shared": "npm run build -w @ai-cowork/shared",
+    "build": "npm run build:shared && npm run build -w @ai-cowork/orchestrator"
+  }
+}
