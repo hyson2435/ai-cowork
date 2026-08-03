@@ -305,8 +305,8 @@ export const ServerEvent = z.discriminatedUnion("type", [
     type: z.literal("copilot.applied"),
     /** 注入的指令 */
     instruction: z.string(),
-    /** 注入方式 */
-    mode: z.enum(["steer", "prompt"]),
+    /** 注入方式：steer=运行中插队 / prompt=空闲触发新 turn / auto=自动判断 */
+    mode: z.enum(["steer", "prompt", "auto"]),
   }),
   /** 权限拦截：Coder 试图执行的危险命令/工具被阻止，已 abort 并 steer 提示 */
   z.object({

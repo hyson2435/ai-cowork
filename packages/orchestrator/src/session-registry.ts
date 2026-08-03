@@ -671,21 +671,36 @@ export class SessionRegistry {
     });
   }
 
-  /** 将 Copilot 的指令注入 Coder */
+  /**
+   * 将 Copilot 的指令注入 Coder。
+   *
+   * ★ 关键修复：之前无条件用 steer，但 steer 只在 Agent 运行中才生效
+   *   （pi 文档：steer = "Queue a steering message while the agent is running"）。
+   *   如果 Coder 当前空闲，steer 的消息会永远卡在队列里，Coder 不会主动醒来处理。
+   *   修复：检测 Coder 是否空闲（agent.state.streamingMessage 为空 = 空闲），
+   *   空闲时改用 prompt 主动触发新 turn，运行中才用 steer 插队。
+   */
   async copilotApply(sessionId: string, instruction: string, mode?: "steer" | "prompt"): Promise<void> {
     const entry = this.sessions.get(sessionId);
     if (!entry) throw new Error(`session not found: ${sessionId}`);
-    const useMode = mode ?? "steer";
-    if (useMode === "steer") {
-      await entry.session.steer(instruction);
-    } else {
+
+    if (mode === "prompt") {
+      // 用户显式指定用 prompt
       await entry.session.prompt(instruction);
+    } else {
+      // 自动判断：Coder 运行中用 steer 插队，空闲用 prompt 触发新 turn
+      const isRunning = !!(entry.session.agent.state as { streamingMessage?: unknown }).streamingMessage;
+      if (isRunning) {
+        await entry.session.steer(instruction);
+      } else {
+        await entry.session.prompt(instruction);
+      }
     }
     this.broadcast({
       sessionId,
       type: "copilot.applied",
       instruction,
-      mode: useMode,
+      mode: mode ?? "auto",
     });
   }
 
