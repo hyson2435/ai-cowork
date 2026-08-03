@@ -5,135 +5,137 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-blue.svg)](CONTRIBUTING.md)
 [![GitHub stars](https://img.shields.io/github/stars/hysonwang/ai-cowork?style=social)](https://github.com/hysonwang/ai-cowork/stargazers)
 
-基于 LLM 的结对编程工作台：一个 **Coder Agent** 写代码，一个 **Reviewer Agent** 实时审查，配合计划审批、快照回滚、预览、危险命令拦截等安全机制，让 AI 改代码既高效又可控。
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-## 功能特性
+An LLM-powered pair-programming workbench: a **Coder Agent** writes code while a **Reviewer Agent** reviews changes in real time. Combined with plan approval, snapshot rollback, live preview, and dangerous-command interception, ai-cowork makes AI-driven code changes both fast and controllable.
 
-### 双 Agent 协作
-- **Coder**：执行编码任务，可调用 read/write/edit/bash 等工具
-- **Reviewer**：每次 Coder 完成一轮修改后自动审查变更文件，发现严重问题会通过 `follow_up` 注入修复建议
-- **Copilot 队列**：可向 Reviewer 提问或要求审查指定文件，支持插队
+## Features
 
-### 三层权限模式（安全防护）
-启动会话时可选：
-| 模式 | Coder 可用工具 | 适用场景 |
-|------|---------------|---------|
-| `free`（默认） | 全部，拦截高危命令 | 日常开发 |
-| `read-only` | 仅 read/grep/ls | 只读探索代码库 |
-| `plan` | 全部，但未批准前拦截 write/edit/bash | 复杂任务先出方案 |
+### Dual-Agent Collaboration
+- **Coder**: executes coding tasks with read/write/edit/bash tools
+- **Reviewer**: automatically reviews changed files after each Coder turn; injects fix suggestions via `follow_up` when severe issues are found
+- **Copilot Queue**: ask the Reviewer questions or request reviews of specific files, with chat tasks able to jump the queue
 
-### 危险命令拦截
-`free` 模式下实时拦截 15 类破坏性命令，命中后立即 abort 并 steer Coder 改用安全方案：
-- 递归强删（`rm -rf`、`rm /`）
-- 提权（`sudo`、`su`、`chmod 777`、`mkfs`、`dd 写设备`）
-- Git 破坏历史（`git push --force`、`git reset --hard`）
-- 远程脚本执行（`curl | sh`）
-- 全局安装 / 发布（`npm i -g`、`pip install -g`、`npm publish`）
-- 持久化后门（写 `.bashrc`/`.profile`）、读取 SSH 密钥、Docker 清理等
+### Three-Tier Permission Modes (Safety)
+Choose when starting a session:
+| Mode | Coder tools | Use case |
+|------|-------------|----------|
+| `free` (default) | All, with high-risk commands intercepted | Daily development |
+| `read-only` | Only read/grep/ls | Read-only codebase exploration |
+| `plan` | All, but write/edit/bash are blocked until approval | Plan before executing complex tasks |
 
-### Plan 先行
-`plan` 模式下 Coder 先输出结构化 markdown 计划（目标/实现步骤/涉及文件/风险），用户在 UI 审批面板批准后才解锁写工具执行，避免 AI 跑偏。
+### Dangerous Command Interception
+In `free` mode, 15 categories of destructive commands are intercepted in real time. On hit, the turn is aborted immediately and the Coder is steered to a safer approach:
+- Recursive force delete (`rm -rf`, `rm /`)
+- Privilege escalation (`sudo`, `su`, `chmod 777`, `mkfs`, `dd` to devices)
+- Git history destruction (`git push --force`, `git reset --hard`)
+- Remote script execution (`curl | sh`)
+- Global install / publish (`npm i -g`, `pip install -g`, `npm publish`)
+- Persistent backdoors (writing `.bashrc`/`.profile`), reading SSH keys, Docker cleanup, etc.
 
-### 工作区管理
-- **Checkpoint**：任意时刻创建工作区快照，一键回滚
-- **Preview**：为会话 cwd 启动静态服务器，改完即时预览（经 orchestrator 代理，无需额外端口）
+### Plan First
+In `plan` mode, the Coder first outputs a structured markdown plan (goal / steps / files / risks). Write tools stay blocked until the user approves the plan in the UI approval panel, preventing the AI from going off track.
 
-## 架构
+### Workspace Management
+- **Checkpoint**: snapshot the workspace at any time and roll back with one click
+- **Preview**: a static server is started for the session's cwd, so changes can be previewed instantly (proxied through the orchestrator — no extra port needed)
 
-Monorepo 三端：
+## Architecture
+
+Monorepo with three packages:
 
 ```
 packages/
-├── shared/        # zod schema：ClientCommand + ServerEvent 协议定义
-├── orchestrator/  # 后端：Fastify + WebSocket + pi-coding-agent
-│   ├── server.ts            # WS 路由、预览代理
-│   ├── session-registry.ts  # 会话生命周期、权限拦截、计划状态机
-│   ├── event-bridge.ts      # pi 事件 → 前端 ServerEvent 映射
-│   ├── checkpoints.ts       # 快照创建/回滚
-│   └── preview-server.ts    # 静态预览服务器
-└── web/           # 前端：React + Vite + Zustand
-    └── src/components/      # 文件树/代码视图/终端/思考流/计划面板/Copilot 等
+├── shared/        # zod schemas: ClientCommand + ServerEvent protocol
+├── orchestrator/  # backend: Fastify + WebSocket + pi-coding-agent
+│   ├── server.ts            # WS routes, preview proxy
+│   ├── session-registry.ts  # session lifecycle, permission interception, plan state machine
+│   ├── event-bridge.ts      # pi events → frontend ServerEvent mapping
+│   ├── checkpoints.ts       # snapshot creation / rollback
+│   └── preview-server.ts    # static preview server
+└── web/           # frontend: React + Vite + Zustand
+    └── src/components/      # file tree / code view / terminal / thought stream / plan panel / Copilot, etc.
 ```
 
-**事件流**：`pi-coding-agent` 事件 → `event-bridge` 扁平化 → `SessionRegistry` broadcast → WebSocket → 前端 store → React 渲染。
+**Event flow**: `pi-coding-agent` events → `event-bridge` flattening → `SessionRegistry` broadcast → WebSocket → frontend store → React rendering.
 
-## 快速开始
+## Quick Start
 
-### 环境要求
+### Requirements
 - Node.js ≥ 18
-- 至少一个模型 API Key（Anthropic / OpenAI / DeepSeek）
+- At least one model API key (Anthropic / OpenAI / DeepSeek)
 
-### 安装
+### Install
 ```bash
-git clone <repo-url> ai-cowork
+git clone https://github.com/hysonwang/ai-cowork.git ai-cowork
 cd ai-cowork
 npm install
 ```
 
-### 配置
+### Configure
 ```bash
 cp .env.example .env
-# 编辑 .env，填入你的 API Key
+# Edit .env and fill in your API key
 ```
 
-### 开发模式（两个终端）
+### Development mode (two terminals)
 ```bash
-# 终端 1：启动后端（监听 :3001）
+# Terminal 1: start backend (listens on :3001)
 npm run dev:orch
 
-# 终端 2：启动前端（监听 :3000，自动代理 /ws 和 /preview 到 3001）
+# Terminal 2: start frontend (listens on :3000, auto-proxies /ws and /preview to 3001)
 npm run dev:web
 ```
-浏览器打开 http://localhost:3000 ，在启动表单填工作目录、任务、权限模式，点「启动 Agent」。
+Open http://localhost:3000, fill in the working directory, task, and permission mode in the launch form, then click "Start Agent".
 
-### 生产部署
+### Production deployment
 ```bash
-npm run build                  # 构建 shared + orchestrator
-npm run build -w @ai-cowork/web  # 构建前端静态产物
-node packages/orchestrator/dist/server.js   # 启动后端
-# 前端用任意静态服务器托管 packages/web/dist（需把 /ws、/preview 反代到 3001）
+npm run build                  # build shared + orchestrator
+npm run build -w @ai-cowork/web  # build frontend static assets
+node packages/orchestrator/dist/server.js   # start backend
+# Serve packages/web/dist with any static server (reverse-proxy /ws and /preview to 3001)
 ```
 
-## 使用指南
+## Usage Guide
 
-### 启动会话
-- **工作目录**：Agent 操作的目标目录（绝对路径，不存在会自动创建）
-- **模型**：形如 `deepseek/deepseek-chat`、`anthropic/claude-sonnet-4-5`
-- **初始任务**：用自然语言描述要让 Coder 做的事
-- **Reviewer**：勾选后启用自动代码审查（默认开启）
-- **权限模式**：见上方「三层权限模式」
+### Starting a Session
+- **Working directory**: the target directory the Agent operates on (absolute path; created automatically if missing)
+- **Model**: e.g. `deepseek/deepseek-chat`, `anthropic/claude-sonnet-4-5`
+- **Initial task**: describe in natural language what the Coder should do
+- **Reviewer**: tick to enable automatic code review (on by default)
+- **Permission mode**: see "Three-Tier Permission Modes" above
 
-### Plan 模式工作流
-1. 选 `plan` 模式启动，Coder 用只读工具探索后输出 markdown 计划
-2. 弹出审批面板，可选：
-   - **批准并执行**：解锁写工具，Coder 按计划执行
-   - **要求修改**：填写反馈，Coder 重新规划
-   - **拒绝重规划**：Coder 完全重新出方案
-3. 批准后底部出现「计划已批准」回看条，可折叠查看原计划
+### Plan Mode Workflow
+1. Start in `plan` mode. The Coder explores with read-only tools, then outputs a markdown plan.
+2. The approval panel appears with three options:
+   - **Approve & execute**: unlock write tools; the Coder executes the plan
+   - **Request changes**: provide feedback; the Coder re-plans
+   - **Reject & re-plan**: the Coder produces a completely new plan
+3. After approval, a "Plan approved" bar appears at the bottom and can be collapsed to review the original plan.
 
-### 输入栏
-- **发送（Steer）**：插入到当前 turn，立即影响 Coder
-- **Follow-up**：排队到下一轮 turn
-- **Abort**：紧急中断当前 turn
-- `Ctrl/Cmd + Enter` 快速发送
+### Input Bar
+- **Send (Steer)**: insert into the current turn, affecting the Coder immediately
+- **Follow-up**: queue for the next turn
+- **Abort**: emergency-interrupt the current turn
+- `Ctrl/Cmd + Enter` to send quickly
 
-## 配置参考
+## Configuration Reference
 
-| 环境变量 | 说明 | 默认 |
-|---------|------|------|
-| `ANTHROPIC_API_KEY` | Anthropic API Key | - |
-| `OPENAI_API_KEY` | OpenAI API Key | - |
-| `DEEPSEEK_API_KEY` | DeepSeek API Key | - |
-| `AICOWORK_DEFAULT_MODEL` | 默认模型 | pi 默认 |
-| `PORT` | orchestrator 端口 | 3001 |
+| Env variable | Description | Default |
+|--------------|-------------|---------|
+| `ANTHROPIC_API_KEY` | Anthropic API key | - |
+| `OPENAI_API_KEY` | OpenAI API key | - |
+| `DEEPSEEK_API_KEY` | DeepSeek API key | - |
+| `AICOWORK_DEFAULT_MODEL` | Default model | pi default |
+| `PORT` | orchestrator port | 3001 |
 
-## 技术栈
-- **后端**：Fastify 4 + @fastify/websocket + @mariozechner/pi-coding-agent + zod
-- **前端**：React 18 + Vite 5 + Zustand + Monaco Editor（代码视图）
-- **模型**：经 pi-ai 支持 Anthropic / OpenAI / DeepSeek 等
+## Tech Stack
+- **Backend**: Fastify 4 + @fastify/websocket + @mariozechner/pi-coding-agent + zod
+- **Frontend**: React 18 + Vite 5 + Zustand + Monaco Editor (code view)
+- **Models**: Anthropic / OpenAI / DeepSeek etc. via pi-ai
 
-## 贡献
-欢迎提 Issue 和 PR。开发指南见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
+## Contributing
+Issues and PRs are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the dev guide.
 
-## 许可证
+## License
 [MIT](./LICENSE)
