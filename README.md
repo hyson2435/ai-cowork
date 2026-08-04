@@ -1,30 +1,57 @@
+<div align="center">
+
 # AI Cowork
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+**Two AI agents pair-program in real time — one writes code, the other reviews it live and auto-injects fixes.**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Node: >=18](https://img.shields.io/badge/Node-%3E%3D18-brightgreen.svg)](https://nodejs.org/)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-blue.svg)](CONTRIBUTING.md)
-[![GitHub stars](https://img.shields.io/github/stars/hysonwang/ai-cowork?style=social)](https://github.com/hysonwang/ai-cowork/stargazers)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-blue.svg)](https://www.typescriptlang.org/)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-blue.svg)](./CONTRIBUTING.md)
+[![GitHub stars](https://img.shields.io/github/stars/hyson2435/ai-cowork?style=social)](https://github.com/hyson2435/ai-cowork/stargazers)
+[![Last Commit](https://img.shields.io/github/last-commit/hyson2435/ai-cowork)](https://github.com/hyson2435/ai-cowork/commits)
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+[English](README.md) · [简体中文](README.zh-CN.md)
 
-An LLM-powered pair-programming workbench: a **Coder Agent** writes code while a **Reviewer Agent** reviews changes in real time. Combined with plan approval, snapshot rollback, live preview, and dangerous-command interception, ai-cowork makes AI-driven code changes both fast and controllable.
+</div>
+
+<!-- TODO: 录一段 10-15 秒 demo GIF 放这里，展示双 Agent 协作 + 预览，star 率高 3-5 倍 -->
+<!-- ![demo](docs/demo.gif) -->
+
+> 🎬 **Demo GIF placeholder** — record a 10-15s clip showing Coder writing code + Reviewer flagging issues + live preview, then replace this line with `![demo](docs/demo.gif)`. Projects with a demo GIF get 3-5× more stars.
+
+---
+
+## Why ai-cowork?
+
+Most AI coding tools either write code blindly (risky) or make you review every change manually (slow). **ai-cowork runs two agents in parallel** — the Coder builds, the Reviewer watches every change and, when it spots a severe issue, **auto-injects a fix into the next Coder turn**. You get the speed of autonomous coding with the safety of continuous review.
+
+| | ai-cowork | Single-agent tools |
+|---|---|---|
+| Real-time code review | ✅ Built-in Reviewer agent | ❌ Manual |
+| Auto-fix on severe issues | ✅ Injected via `follow_up` | ❌ You re-prompt |
+| Plan before execute | ✅ Plan mode + approval panel | ❌ Often |
+| One-click rollback | ✅ Workspace snapshots | ❌ Git only |
+| Live preview | ✅ Built-in static server | ❌ Separate setup |
+| Dangerous command guard | ✅ 15 categories intercepted | ❌ Hope for the best |
 
 ## Features
 
-### Dual-Agent Collaboration
+### 🤝 Dual-Agent Collaboration
 - **Coder**: executes coding tasks with read/write/edit/bash tools
-- **Reviewer**: automatically reviews changed files after each Coder turn; injects fix suggestions via `follow_up` when severe issues are found
-- **Copilot Queue**: ask the Reviewer questions or request reviews of specific files, with chat tasks able to jump the queue
+- **Reviewer**: automatically reviews changed files after each Coder turn; when severe issues are found, a fix suggestion is injected into the Coder via `follow_up` — **the loop closes itself**
+- **Copilot Queue**: ask the Reviewer questions or request reviews of specific files; chat tasks can jump the queue ahead of reviews
 
-### Three-Tier Permission Modes (Safety)
+### 🛡️ Three-Tier Permission Modes
 Choose when starting a session:
+
 | Mode | Coder tools | Use case |
 |------|-------------|----------|
 | `free` (default) | All, with high-risk commands intercepted | Daily development |
 | `read-only` | Only read/grep/ls | Read-only codebase exploration |
 | `plan` | All, but write/edit/bash are blocked until approval | Plan before executing complex tasks |
 
-### Dangerous Command Interception
+### 🚫 Dangerous Command Interception
 In `free` mode, 15 categories of destructive commands are intercepted in real time. On hit, the turn is aborted immediately and the Coder is steered to a safer approach:
 - Recursive force delete (`rm -rf`, `rm /`)
 - Privilege escalation (`sudo`, `su`, `chmod 777`, `mkfs`, `dd` to devices)
@@ -33,10 +60,10 @@ In `free` mode, 15 categories of destructive commands are intercepted in real ti
 - Global install / publish (`npm i -g`, `pip install -g`, `npm publish`)
 - Persistent backdoors (writing `.bashrc`/`.profile`), reading SSH keys, Docker cleanup, etc.
 
-### Plan First
-In `plan` mode, the Coder first outputs a structured markdown plan (goal / steps / files / risks). Write tools stay blocked until the user approves the plan in the UI approval panel, preventing the AI from going off track.
+### 📋 Plan First
+In `plan` mode, the Coder first outputs a structured markdown plan (goal / steps / files / risks). Write tools stay blocked until you approve the plan in the UI approval panel — preventing the AI from going off track on complex tasks.
 
-### Workspace Management
+### 🗂️ Workspace Management
 - **Checkpoint**: snapshot the workspace at any time and roll back with one click
 - **Preview**: a static server is started for the session's cwd, so changes can be previewed instantly (proxied through the orchestrator — no extra port needed)
 
@@ -67,7 +94,7 @@ packages/
 
 ### Install
 ```bash
-git clone https://github.com/hysonwang/ai-cowork.git ai-cowork
+git clone https://github.com/hyson2435/ai-cowork.git ai-cowork
 cd ai-cowork
 npm install
 ```
@@ -127,12 +154,24 @@ node packages/orchestrator/dist/server.js   # start backend
 | `OPENAI_API_KEY` | OpenAI API key | - |
 | `DEEPSEEK_API_KEY` | DeepSeek API key | - |
 | `AICOWORK_DEFAULT_MODEL` | Default model | pi default |
+| `AICOWORK_HOST` | Listen address (default loopback; set `0.0.0.0` to expose) | `127.0.0.1` |
+| `AICOWORK_AUTH_TOKEN` | WS auth token (required when exposing to public) | - |
 | `PORT` | orchestrator port | 3001 |
 
 ## Tech Stack
 - **Backend**: Fastify 4 + @fastify/websocket + @mariozechner/pi-coding-agent + zod
 - **Frontend**: React 18 + Vite 5 + Zustand + Monaco Editor (code view)
 - **Models**: Anthropic / OpenAI / DeepSeek etc. via pi-ai
+
+## Roadmap
+
+- [ ] Multi-model routing (cheap model for review, strong model for code)
+- [ ] Diff-aware Reviewer (only review changed hunks, not whole files)
+- [ ] Test-run integration (Reviewer can trigger tests, not just read code)
+- [ ] VS Code extension (use ai-cowork inside your editor)
+- [ ] Self-hosted model support (Ollama / vLLM)
+
+> Have an idea? [Open a discussion](https://github.com/hyson2435/ai-cowork/discussions) or an [issue](https://github.com/hyson2435/ai-cowork/issues).
 
 ## Contributing
 Issues and PRs are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the dev guide.
