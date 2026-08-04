@@ -560,11 +560,24 @@ export class SessionRegistry {
         //   注意：这里不能用 steer，steer 会在当前 turn 工具调用后立即注入，
         //   可能打断 Coder 正在做的连续操作；followUp 等当前完全结束更安全。
         const isRunning = !!(entry.session.agent.state as { streamingMessage?: unknown }).streamingMessage;
+        let actualMode: "steer" | "prompt";
         if (isRunning) {
           await entry.session.followUp(fmsg);
+          actualMode = "steer";
         } else {
           await entry.session.prompt(fmsg);
+          actualMode = "prompt";
         }
+        // ★ BUG 修复：之前自动注入严重修复时没有任何可见事件广播，用户看到 🚨 严重
+        //   review 后界面毫无反馈，误以为"没自动修复"。复用 copilot.applied 事件，
+        //   前端会显示"✅ Copilot 指令已注入 Coder（prompt/steer）: ..."，让用户
+        //   明确看到自动修复已触发。
+        this.broadcast({
+          sessionId,
+          type: "copilot.applied",
+          instruction: fmsg,
+          mode: actualMode,
+        });
       } catch (err) {
         this.broadcast({
           sessionId,
