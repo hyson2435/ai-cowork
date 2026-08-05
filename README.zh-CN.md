@@ -1,4 +1,4 @@
-<div align="center">
+﻿<div align="center">
 
 # AI Cowork
 
@@ -16,10 +16,9 @@
 </div>
 
 <!-- TODO: 录一段 10-15 秒 demo GIF 放这里，展示双 Agent 协作 + 预览，star 率高 3-5 倍 -->
-<!-- ![demo](docs/demo.gif) -->
+![demo](docs/demo.gif)
 
-> 🎬 **Demo GIF 占位** —— 录一段 10-15 秒视频，展示 Coder 写代码 + Reviewer 标记问题 + 实时预览，然后把这一行替换为 `![demo](docs/demo.gif)`。带 demo GIF 的项目 star 率高 3-5 倍。
-
+> 🎬 15 秒演示：启动 session → Coder 写代码 → Reviewer 标记严重 XSS 问题 → Copilot 自动注入修复 → 实时预览刷新。
 ---
 
 ## 为什么用 ai-cowork？
